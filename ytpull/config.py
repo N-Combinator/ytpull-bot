@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 # Telegram upload limits (bytes).
 PUBLIC_API_UPLOAD_LIMIT = 50 * 1024 * 1024          # 50 MB on api.telegram.org
-LOCAL_API_UPLOAD_LIMIT = 2 * 1024 * 1024 * 1024     # 2 GB on a self-hosted server
+LOCAL_API_UPLOAD_LIMIT = 2000 * 1024 * 1024         # 2000 MB — max a local Bot API server accepts
 
 
 @dataclass(frozen=True)
