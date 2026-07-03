@@ -5,6 +5,7 @@ __pycache__/
 venv/
 env/
 .env
+telegram-bot-api.env
 downloads/
 *.log
 
