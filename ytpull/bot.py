@@ -53,7 +53,10 @@ def build_keyboard(token: str, options, upload_limit: int) -> InlineKeyboardMark
         size_txt = human_size(opt.est_size)
         oversized = opt.est_size is not None and opt.est_size > upload_limit
         prefix = "⛔ " if oversized else ""
-        text = f"{prefix}{opt.label} · {size_txt}"
+        # Video tiers without an H.264 stream (usually >1080p) may not play in the
+        # iOS stock player — flag them so the user isn't surprised by a frozen frame.
+        suffix = " ⚠️" if opt.kind == "video" and not opt.h264 else ""
+        text = f"{prefix}{opt.label}{suffix} · {size_txt}"
         row.append(InlineKeyboardButton(text, callback_data=f"dl:{token}:{opt.key}"))
         if len(row) == 2:
             rows.append(row)
@@ -100,8 +103,11 @@ async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cfg: Config = ctx.application.bot_data[CFG]
 
     title = info.get("title") or "видео"
+    legend = ""
+    if any(o.kind == "video" and not o.h264 for o in options):
+        legend = "\n\n⚠️ — может не играть на iPhone (нет H.264 в этом качестве)"
     await status.edit_text(
-        f"🎬 <b>{title}</b>\nВыбери качество:",
+        f"🎬 <b>{title}</b>\nВыбери качество:{legend}",
         parse_mode="HTML",
         reply_markup=build_keyboard(token, options, cfg.upload_limit),
     )

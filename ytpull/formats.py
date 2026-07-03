@@ -18,6 +18,8 @@ class QualityOption:
     label: str        # human label for the button
     est_size: int | None   # estimated bytes, or None if unknown
     kind: str         # "video" | "audio"
+    h264: bool = True  # True if an H.264 (avc1) stream exists at this tier —
+                       # tiers without it (usually >1080p) may not play on iOS
 
 
 def _size(f: dict) -> int | None:
@@ -52,6 +54,7 @@ def parse_options(info: dict, ffmpeg_available: bool) -> list[QualityOption]:
     options: list[QualityOption] = []
     for h in sorted(by_height, reverse=True):
         bucket = by_height[h]
+        has_h264 = any((f.get("vcodec") or "").startswith("avc1") for f in bucket)
         progressive = [f for f in bucket if _has_audio(f)]
         if progressive:
             best = max(progressive, key=lambda f: _size(f) or 0)
@@ -63,7 +66,9 @@ def parse_options(info: dict, ffmpeg_available: bool) -> list[QualityOption]:
             best = max(bucket, key=lambda f: _size(f) or 0)
             vsize = _size(best)
             est = (vsize + audio_size) if (vsize and audio_size) else vsize
-        options.append(QualityOption(key=f"v{h}", label=f"{h}p", est_size=est, kind="video"))
+        options.append(
+            QualityOption(key=f"v{h}", label=f"{h}p", est_size=est, kind="video", h264=has_h264)
+        )
 
     if best_audio:
         options.append(
