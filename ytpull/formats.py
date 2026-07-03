@@ -78,9 +78,16 @@ def selector_for(key: str) -> str:
         return "bestaudio/best"
     if key.startswith("v"):
         h = key[1:]
-        # Prefer a merged video+audio at/under the height; fall back to the best
-        # progressive stream that already carries audio.
-        return f"bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+        # Prefer H.264 (avc1) + AAC (mp4a): those play natively in the iOS/macOS
+        # stock player. YouTube serves avc1 up to 1080p; above that only av01/vp9
+        # exist, which iOS can't decode inline (frozen frame), so we fall back to
+        # the best available codec there. Last resorts: any merge, then progressive.
+        return (
+            f"bestvideo[height<={h}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+            f"bestvideo[height<={h}][vcodec^=avc1]+bestaudio/"
+            f"bestvideo[height<={h}]+bestaudio/"
+            f"best[height<={h}]/best"
+        )
     return "best"
 
 

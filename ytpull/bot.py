@@ -34,6 +34,17 @@ CFG = "config"
 CACHE = "cache"
 FFMPEG = "ffmpeg"
 
+# Uploading a multi-hundred-MB / multi-GB file to the (local) Bot API server takes
+# minutes; the python-telegram-bot default read/write timeouts (~5s) fire long
+# before the server finishes ingesting the upload, raising TimedOut even though the
+# file is delivered. Give media sends generous timeouts to avoid a false failure.
+UPLOAD_TIMEOUTS = {
+    "read_timeout": 1800,
+    "write_timeout": 1800,
+    "connect_timeout": 60,
+    "pool_timeout": 60,
+}
+
 
 def build_keyboard(token: str, options, upload_limit: int) -> InlineKeyboardMarkup:
     """Two-per-row quality buttons; oversized video tiers are marked ⛔."""
@@ -149,10 +160,16 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(messages.UPLOADING)
         with open(path, "rb") as fh:
             if opt.kind == "audio":
-                await ctx.bot.send_audio(query.message.chat_id, fh, title=entry.title)
+                await ctx.bot.send_audio(
+                    query.message.chat_id, fh, title=entry.title, **UPLOAD_TIMEOUTS
+                )
             else:
                 await ctx.bot.send_video(
-                    query.message.chat_id, fh, caption=entry.title, supports_streaming=True
+                    query.message.chat_id,
+                    fh,
+                    caption=entry.title,
+                    supports_streaming=True,
+                    **UPLOAD_TIMEOUTS,
                 )
         await query.edit_message_text(f"✅ Готово: {entry.title}")
     except DownloadError as exc:
