@@ -22,8 +22,20 @@ class QualityOption:
                        # tiers without it (usually >1080p) may not play on iOS
 
 
-def _size(f: dict) -> int | None:
-    return f.get("filesize") or f.get("filesize_approx")
+def _size(f: dict, duration: float | None = None) -> int | None:
+    """Format size in bytes: exact if yt-dlp gives it, else estimated from bitrate.
+
+    Many DASH formats carry no filesize/filesize_approx, only a bitrate (tbr/vbr/
+    abr in kbit/s). With the clip duration we can approximate bytes so the menu
+    never shows a bare '?'.
+    """
+    exact = f.get("filesize") or f.get("filesize_approx")
+    if exact:
+        return exact
+    bitrate = f.get("tbr") or f.get("vbr") or f.get("abr")  # kbit/s
+    if bitrate and duration:
+        return int(bitrate * 1000 / 8 * duration)
+    return None
 
 
 def _has_audio(f: dict) -> bool:
@@ -37,10 +49,11 @@ def _has_video(f: dict) -> bool:
 def parse_options(info: dict, ffmpeg_available: bool) -> list[QualityOption]:
     """Build the quality menu from an extracted-info dict."""
     formats = info.get("formats") or []
+    duration = info.get("duration")
 
     audio_only = [f for f in formats if _has_audio(f) and not _has_video(f)]
     best_audio = max(audio_only, key=lambda f: f.get("abr") or 0, default=None)
-    audio_size = _size(best_audio) if best_audio else None
+    audio_size = _size(best_audio, duration) if best_audio else None
 
     by_height: dict[int, list[dict]] = {}
     for f in formats:
@@ -62,14 +75,14 @@ def parse_options(info: dict, ffmpeg_available: bool) -> list[QualityOption]:
         has_h264 = any((f.get("vcodec") or "").startswith("avc1") for f in bucket)
         progressive = [f for f in bucket if _has_audio(f)]
         if progressive:
-            best = max(progressive, key=lambda f: _size(f) or 0)
-            est = _size(best)
+            best = max(progressive, key=lambda f: _size(f, duration) or 0)
+            est = _size(best, duration)
         else:
             # Video-only at this height needs an ffmpeg merge with the audio track.
             if not ffmpeg_available:
                 continue
-            best = max(bucket, key=lambda f: _size(f) or 0)
-            vsize = _size(best)
+            best = max(bucket, key=lambda f: _size(f, duration) or 0)
+            vsize = _size(best, duration)
             est = (vsize + audio_size) if (vsize and audio_size) else vsize
         options.append(
             QualityOption(key=f"v{h}", label=f"{h}p", est_size=est, kind="video", h264=has_h264)

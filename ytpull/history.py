@@ -15,11 +15,12 @@ bot keeps in the pinned message.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import threading
 
-HEADER = "📥 История загрузок"
+HEADER = "📥 <b>История загрузок</b>"
 _MAX_LEN = 4000  # keep under Telegram's 4096-char message limit
 
 
@@ -53,14 +54,13 @@ class HistoryStore:
             self._chat(chat_id)["pinned"] = message_id
             self._save()
 
-    def add(self, chat_id: int, channel_tag: str, title_tag: str) -> str:
-        """Record a channel/video and return the freshly rendered pinned text."""
+    def add(self, chat_id: int, channel_tag: str, title: str, url: str) -> str:
+        """Record a channel/video (title + link) and return rendered HTML text."""
         with self._lock:
             channels: dict = self._chat(chat_id)["channels"]
             vids = channels.setdefault(channel_tag, [])
-            if title_tag in vids:
-                vids.remove(title_tag)  # move to most-recent position
-            vids.append(title_tag)
+            vids[:] = [v for v in vids if v.get("url") != url]  # de-dup by video
+            vids.append({"title": title, "url": url})
             self._save()
         return self.render(chat_id)
 
@@ -72,7 +72,10 @@ class HistoryStore:
             blocks = [HEADER, ""]
             for chan, vids in reversed(items):
                 blocks.append(f"#{chan}:")
-                blocks.extend(f" - #{v}" for v in vids)
+                for v in vids:
+                    title = html.escape(v.get("title") or "видео")
+                    href = html.escape(v.get("url") or "", quote=True)
+                    blocks.append(f'  • <a href="{href}">{title}</a>')
                 blocks.append("")
             text = "\n".join(blocks).strip()
             if len(text) <= _MAX_LEN or len(items) <= 1:

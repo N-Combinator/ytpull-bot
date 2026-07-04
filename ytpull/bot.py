@@ -297,10 +297,12 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:  # noqa: BLE001
                 pass
         offer = InlineKeyboardMarkup([[
-            InlineKeyboardButton("➕ В историю", callback_data=f"hist:{token}:{key}"),
-            InlineKeyboardButton("✖️", callback_data="hist:no"),
+            InlineKeyboardButton("Да", callback_data=f"hist:{token}:{key}"),
+            InlineKeyboardButton("Нет", callback_data="hist:no"),
         ]])
-        await _safe_edit_markup(query.message, "Сохранить в историю?", offer)
+        await _safe_edit_markup(
+            query.message, "🗂 Сохранить в историю? (закреплённое сообщение чата)", offer
+        )
     except DownloadError as exc:
         await query.edit_message_text(messages.classify_error(exc))
     except Exception as exc:  # noqa: BLE001
@@ -320,11 +322,16 @@ async def _update_pinned(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str
     pinned_id = hist.pinned_id(chat_id)
     if pinned_id:
         try:
-            await ctx.bot.edit_message_text(text, chat_id=chat_id, message_id=pinned_id)
+            await ctx.bot.edit_message_text(
+                text, chat_id=chat_id, message_id=pinned_id,
+                parse_mode="HTML", disable_web_page_preview=True,
+            )
             return
         except Exception:  # noqa: BLE001 - pinned message gone; fall through to recreate
             hist.set_pinned(chat_id, None)
-    msg = await ctx.bot.send_message(chat_id, text)
+    msg = await ctx.bot.send_message(
+        chat_id, text, parse_mode="HTML", disable_web_page_preview=True
+    )
     try:
         await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
     except Exception:  # noqa: BLE001 - pin not critical, keep the message anyway
@@ -352,7 +359,7 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     entry = cache.get(token)
     if entry is not None:
         channel = _channel_tag(entry.info) or "unknown"
-        text = hist.add(chat_id, channel, _title_tag(entry.title))
+        text = hist.add(chat_id, channel, entry.title, entry.url)
         await _update_pinned(ctx, chat_id, text)
     await query.message.delete()
 
