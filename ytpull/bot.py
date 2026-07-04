@@ -80,6 +80,19 @@ async def _safe_edit_markup(message, text: str, markup) -> None:
         pass
 
 
+HIST_MSG = "hist_msg"  # ctx.chat_data key: id of the currently shown history message
+
+
+async def _clear_history_msg(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Delete the previously shown history message so it stops polluting search."""
+    mid = ctx.chat_data.pop(HIST_MSG, None)
+    if mid:
+        try:
+            await ctx.bot.delete_message(chat_id, mid)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _slug(name: str, maxlen: int = 64) -> str:
     """Telegram-hashtag-safe slug: non-word runs -> underscore (Unicode-aware)."""
     return re.sub(r"\W+", "_", name, flags=re.UNICODE).strip("_")[:maxlen].strip("_")
@@ -174,6 +187,9 @@ async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _ensure_access(update, ctx):
         return
+    # A new user message arrived — drop any lingering history message so it doesn't
+    # keep polluting the chat's hashtag search.
+    await _clear_history_msg(ctx, update.message.chat_id)
     text = update.message.text or ""
     match = YOUTUBE_RE.search(text)
     if not match:
@@ -427,11 +443,14 @@ async def show_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(messages.NEED_PASSWORD)
         return
     hist: HistoryDB = ctx.application.bot_data[HISTORY]
-    if not hist.records(update.message.chat_id):
+    chat_id = update.message.chat_id
+    await _clear_history_msg(ctx, chat_id)  # replace any previous history message
+    if not hist.records(chat_id):
         await update.message.reply_text("История пуста.", reply_markup=KEYBOARD)
         return
-    text, pages, page = hist.render_page(update.message.chat_id, 0)
-    await update.message.reply_text(text, reply_markup=_view_kb(page, pages))
+    text, pages, page = hist.render_page(chat_id, 0)
+    sent = await update.message.reply_text(text, reply_markup=_view_kb(page, pages))
+    ctx.chat_data[HIST_MSG] = sent.message_id
 
 
 async def on_hist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
