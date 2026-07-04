@@ -19,6 +19,7 @@ class Config:
     api_base: str | None
     download_dir: str
     log_level: str
+    auth_seed: str  # secret seed for the access-password gate ("" disables the gate)
 
     @property
     def upload_limit(self) -> int:
@@ -46,9 +47,12 @@ def load_config() -> Config:
 
     log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
+    auth_seed = os.environ.get("AUTH_SEED", "").strip()
+
     return Config(
         bot_token=token,
         api_base=api_base,
         download_dir=download_dir,
         log_level=log_level,
+        auth_seed=auth_seed,
     )

@@ -19,6 +19,7 @@ class Entry:
     title: str
     info: dict[str, Any]
     options: list[Any]
+    user_msg_id: int | None = None  # the user's original link message, to delete after send
     created: float = field(default_factory=time.monotonic)
 
 
@@ -33,10 +34,19 @@ class ExtractCache:
         for t in stale:
             self._store.pop(t, None)
 
-    def put(self, url: str, title: str, info: dict[str, Any], options: list[Any]) -> str:
+    def put(
+        self,
+        url: str,
+        title: str,
+        info: dict[str, Any],
+        options: list[Any],
+        user_msg_id: int | None = None,
+    ) -> str:
         self._evict()
         token = uuid.uuid4().hex[:10]
-        self._store[token] = Entry(url=url, title=title, info=info, options=options)
+        self._store[token] = Entry(
+            url=url, title=title, info=info, options=options, user_msg_id=user_msg_id
+        )
         return token
 
     def get(self, token: str) -> Entry | None:

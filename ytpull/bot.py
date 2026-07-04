@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -17,6 +19,7 @@ from telegram.ext import (
 )
 
 from . import messages
+from .auth import AuthStore
 from .cache import ExtractCache
 from .config import Config
 from .downloader import DownloadError, download, extract_info, ffmpeg_available
@@ -33,6 +36,20 @@ YOUTUBE_RE = re.compile(
 CFG = "config"
 CACHE = "cache"
 FFMPEG = "ffmpeg"
+AUTH = "auth"
+
+
+def _render_bar(pct: int, width: int = 12) -> str:
+    filled = max(0, min(width, round(pct / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+async def _safe_edit(message, text: str) -> None:
+    """Edit a message, swallowing 'not modified' / flood / transient errors."""
+    try:
+        await message.edit_text(text)
+    except Exception:  # noqa: BLE001 - progress edits are best-effort
+        pass
 
 # Uploading a multi-hundred-MB / multi-GB file to the (local) Bot API server takes
 # minutes; the python-telegram-bot default read/write timeouts (~5s) fire long
@@ -66,8 +83,36 @@ def build_keyboard(token: str, options, upload_limit: int) -> InlineKeyboardMark
     return InlineKeyboardMarkup(rows)
 
 
-async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(messages.START)
+async def _ensure_access(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Password gate. Returns True only if the user may proceed with this message.
+
+    An unauthorized user's message is treated as a password attempt: on success we
+    remember them (and delete the message so the password doesn't linger); either
+    way the current message is consumed, so callers stop when this returns False.
+    """
+    store: AuthStore = ctx.application.bot_data[AUTH]
+    uid = update.effective_user.id
+    if store.is_authorized(uid):
+        return True
+    text = (update.message.text or "") if update.message else ""
+    if store.check_password(text):
+        store.authorize(uid)
+        await update.message.reply_text(messages.ACCESS_GRANTED)
+        try:
+            await ctx.bot.delete_message(update.message.chat_id, update.message.message_id)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        await update.message.reply_text(messages.NEED_PASSWORD)
+    return False
+
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    store: AuthStore = ctx.application.bot_data[AUTH]
+    if store.is_authorized(update.effective_user.id):
+        await update.message.reply_text(messages.START)
+    else:
+        await update.message.reply_text(messages.NEED_PASSWORD)
 
 
 async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -75,6 +120,8 @@ async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _ensure_access(update, ctx):
+        return
     text = update.message.text or ""
     match = YOUTUBE_RE.search(text)
     if not match:
@@ -99,7 +146,9 @@ async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     cache: ExtractCache = ctx.application.bot_data[CACHE]
-    token = cache.put(url, info.get("title") or "video", info, options)
+    token = cache.put(
+        url, info.get("title") or "video", info, options, user_msg_id=update.message.message_id
+    )
     cfg: Config = ctx.application.bot_data[CFG]
 
     title = info.get("title") or "видео"
@@ -116,6 +165,11 @@ async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+
+    store: AuthStore = ctx.application.bot_data[AUTH]
+    if not store.is_authorized(update.effective_user.id):
+        await query.answer(messages.NEED_PASSWORD, show_alert=True)
+        return
 
     try:
         _, token, key = query.data.split(":", 2)
@@ -145,6 +199,26 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     await query.edit_message_text(messages.DOWNLOADING.format(label=opt.label))
 
+    # Live progress: yt-dlp calls `hook` from its worker thread, so we bounce the
+    # message edit back onto this event loop, throttled to avoid Telegram flood
+    # limits (every ~3s and only when the percentage advances).
+    loop = asyncio.get_running_loop()
+    prog = {"pct": -1, "t": 0.0}
+
+    def hook(d: dict) -> None:
+        if d.get("status") != "downloading":
+            return
+        total = d.get("total_bytes") or d.get("total_bytes_estimate")
+        if not total:
+            return
+        pct = int((d.get("downloaded_bytes") or 0) * 100 / total)
+        now = time.monotonic()
+        if pct <= prog["pct"] or now - prog["t"] < 3:
+            return
+        prog["pct"], prog["t"] = pct, now
+        text = f"⬇️ {opt.label}\n{_render_bar(pct)} {pct}%"
+        asyncio.run_coroutine_threadsafe(_safe_edit(query.message, text), loop)
+
     path = None
     try:
         path = await download(
@@ -152,6 +226,7 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             selector_for(key),
             cfg.download_dir,
             to_audio=(opt.kind == "audio"),
+            progress=hook,
         )
 
         size = os.path.getsize(path)
@@ -185,6 +260,13 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     **UPLOAD_TIMEOUTS,
                 )
         await query.edit_message_text(f"✅ Готово: {entry.title}")
+        # Clean up the user's original link message so the chat doesn't fill with
+        # links. In a private chat a bot may delete the other party's messages.
+        if entry.user_msg_id:
+            try:
+                await ctx.bot.delete_message(query.message.chat_id, entry.user_msg_id)
+            except Exception:  # noqa: BLE001
+                pass
     except DownloadError as exc:
         await query.edit_message_text(messages.classify_error(exc))
     except Exception as exc:  # noqa: BLE001
@@ -207,6 +289,8 @@ def build_application(cfg: Config) -> Application:
     app.bot_data[CFG] = cfg
     app.bot_data[CACHE] = ExtractCache()
     app.bot_data[FFMPEG] = ffmpeg_available()
+    auth_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "authorized.json")
+    app.bot_data[AUTH] = AuthStore(cfg.auth_seed, auth_path)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

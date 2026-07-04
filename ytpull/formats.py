@@ -53,6 +53,11 @@ def parse_options(info: dict, ffmpeg_available: bool) -> list[QualityOption]:
 
     options: list[QualityOption] = []
     for h in sorted(by_height, reverse=True):
+        # We only offer up to 1080p: above that YouTube has no H.264 (only av01/vp9)
+        # and the files are huge — 1080p is the sweet spot for the document-based
+        # delivery that plays natively on phones.
+        if h > 1080:
+            continue
         bucket = by_height[h]
         has_h264 = any((f.get("vcodec") or "").startswith("avc1") for f in bucket)
         progressive = [f for f in bucket if _has_audio(f)]
