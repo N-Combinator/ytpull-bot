@@ -149,6 +149,7 @@ async def _ensure_access(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool
     if store.check_password(text):
         store.authorize(uid)
         await update.message.reply_text(messages.ACCESS_GRANTED, reply_markup=KEYBOARD)
+        await update.message.reply_text(messages.HELP)  # onboarding right after auth
         try:
             await ctx.bot.delete_message(update.message.chat_id, update.message.message_id)
         except Exception:  # noqa: BLE001
