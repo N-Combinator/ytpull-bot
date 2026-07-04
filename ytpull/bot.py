@@ -170,11 +170,18 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     query.message.chat_id, fh, title=entry.title, **UPLOAD_TIMEOUTS
                 )
             else:
-                await ctx.bot.send_video(
+                # EXPERIMENT (Nikolay's hypothesis): send video as a document rather
+                # than send_video — Telegram then won't try to inline-decode the
+                # stream (AV1) and hands the raw file to the phone's native player on
+                # open. Does NOT change the codec; revert to send_video if it doesn't
+                # help (send_video keeps in-app preview/streaming, document does not).
+                ext = os.path.splitext(path)[1] or ".mp4"
+                safe = re.sub(r"[^\w\-]+", "_", entry.title).strip("_")[:60] or "video"
+                await ctx.bot.send_document(
                     query.message.chat_id,
                     fh,
+                    filename=f"{safe}{ext}",
                     caption=entry.title,
-                    supports_streaming=True,
                     **UPLOAD_TIMEOUTS,
                 )
         await query.edit_message_text(f"✅ Готово: {entry.title}")
