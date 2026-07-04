@@ -100,18 +100,22 @@ async def main(url: str) -> None:
             check(bool(doc.message_id), "send_document with reply keyboard ok")
             await bot.delete_message(chat_id, doc.message_id)
 
-    print("4) history record / render / delete")
+    print("4) history record / render / paginate / delete")
     hpath = os.path.join(outdir, "smoke_history.db")
     db = HistoryDB(hpath)
-    n1 = db.next_number(999)
-    n2 = db.next_number(999)
-    db.record(999, n1, "SmokeChan", "Vid one", "144p", "https://y/1", 11)
-    db.record(999, n2, "SmokeChan", "Vid two", "144p", "https://y/2", 12)
-    rendered = db.render(999)
-    check("#N%04d" % n1 in rendered, "history renders #N-prefixed numbers")
-    check(len(db.records(999)) == 2, "history has 2 records")
+    nums = []
+    for i in range(23):  # spans multiple pages
+        n = db.next_number(999)
+        nums.append(n)
+        db.record(999, n, f"SmokeChan{i % 2}", f"Vid {i}", "144p", f"https://y/{i}", 10 + i)
+    text, pages, page = db.render_page(999, 0)
+    check("#N%04d" % nums[-1] in text, "history renders #N-prefixed numbers")
+    check(pages == 3 and len(db.page_records(999, 0)) == 10, "pagination: 23 rows -> 3 pages of 10")
+    _, _, clamped = db.render_page(999, 99)
+    check(clamped == 2, "out-of-range page clamps to last page")
+    before = len(db.records(999))
     db.delete(999, db.records(999)[0]["id"])
-    check(len(db.records(999)) == 1, "delete removes a record")
+    check(len(db.records(999)) == before - 1, "delete removes a record")
 
     # cleanup
     for p in (path, hpath):

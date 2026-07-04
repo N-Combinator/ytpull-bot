@@ -388,6 +388,38 @@ async def on_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.message.delete()
 
 
+def _nav_row(prefix: str, page: int, pages: int) -> list:
+    """⬅️ N/M ➡️ navigation row for callbacks like '{prefix}:{page}'."""
+    if pages <= 1:
+        return []
+    row = []
+    if page > 0:
+        row.append(InlineKeyboardButton("⬅️", callback_data=f"{prefix}:{page - 1}"))
+    row.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="hnop"))
+    if page < pages - 1:
+        row.append(InlineKeyboardButton("➡️", callback_data=f"{prefix}:{page + 1}"))
+    return row
+
+
+def _view_kb(page: int, pages: int) -> InlineKeyboardMarkup:
+    rows = [r for r in [_nav_row("hv", page, pages)] if r]
+    rows.append([InlineKeyboardButton("✏️ Редактировать", callback_data=f"he:{page}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _edit_kb(records: list[dict], page: int, pages: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"✖️ #N{r['num']:04d} {r['title']}"[:60],
+                              callback_data=f"hd:{r['id']}:{page}")]
+        for r in records
+    ]
+    nav = _nav_row("he", page, pages)
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("Готово", callback_data=f"hv:{page}")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def show_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the 'История скачивания' reply-keyboard button."""
     store: AuthStore = ctx.application.bot_data[AUTH]
@@ -395,56 +427,46 @@ async def show_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(messages.NEED_PASSWORD)
         return
     hist: HistoryDB = ctx.application.bot_data[HISTORY]
-    text = hist.render(update.message.chat_id)
     if not hist.records(update.message.chat_id):
         await update.message.reply_text("История пуста.", reply_markup=KEYBOARD)
         return
-    markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✏️ Редактировать", callback_data="hedit")]]
-    )
-    await update.message.reply_text(text, reply_markup=markup)
+    text, pages, page = hist.render_page(update.message.chat_id, 0)
+    await update.message.reply_text(text, reply_markup=_view_kb(page, pages))
 
 
-def _edit_markup(records: list[dict]) -> InlineKeyboardMarkup:
-    """One delete button per history row, plus a Готово button."""
-    rows = [
-        [InlineKeyboardButton(f"✖️ #N{r['num']:04d} {r['title']}"[:60],
-                              callback_data=f"hdel:{r['id']}")]
-        for r in records
-    ]
-    rows.append([InlineKeyboardButton("Готово", callback_data="hdone")])
-    return InlineKeyboardMarkup(rows)
-
-
-async def on_hist_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit view for the history: delete individual entries."""
+async def on_hist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """History view/edit navigation: hv:<page>, he:<page>, hd:<id>:<page>, hnop."""
     query = update.callback_query
     await query.answer()
     hist: HistoryDB = ctx.application.bot_data[HISTORY]
     chat_id = query.message.chat_id
+    data = query.data
 
-    if query.data == "hdone":
-        text = hist.render(chat_id)
-        if hist.records(chat_id):
-            markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("✏️ Редактировать", callback_data="hedit")]]
-            )
-            await _safe_edit_markup(query.message, text, markup)
-        else:
-            await _safe_edit(query.message, "История пуста.")
+    if data == "hnop":
         return
 
-    if query.data.startswith("hdel:"):
+    if data.startswith("hd:"):  # delete, then fall through to re-render the edit page
         try:
-            hist.delete(chat_id, int(query.data.split(":", 1)[1]))
-        except (ValueError, IndexError):
-            pass
+            _, rid, pg = data.split(":")
+            hist.delete(chat_id, int(rid))
+            data = f"he:{pg}"
+        except ValueError:
+            data = "he:0"
 
-    records = hist.records(chat_id)
-    if not records:
+    if not hist.records(chat_id):
         await _safe_edit(query.message, "История пуста.")
         return
-    await _safe_edit_markup(query.message, "Удалить записи:", _edit_markup(records))
+
+    page = int(data.split(":", 1)[1]) if ":" in data else 0
+    if data.startswith("he:"):
+        pages = hist.page_count(chat_id)
+        page = max(0, min(page, pages - 1))
+        recs = hist.page_records(chat_id, page)
+        header = f"✏️ Удаление (стр. {page + 1}/{pages}) — нажми ✖️, чтобы удалить:"
+        await _safe_edit_markup(query.message, header, _edit_kb(recs, page, pages))
+    else:  # hv: — plain view
+        text, pages, page = hist.render_page(chat_id, page)
+        await _safe_edit_markup(query.message, text, _view_kb(page, pages))
 
 
 def build_application(cfg: Config) -> Application:
@@ -464,7 +486,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(on_choice, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(on_save, pattern=r"^save:"))
-    app.add_handler(CallbackQueryHandler(on_hist_edit, pattern=r"^h(edit|del|done)"))
+    app.add_handler(CallbackQueryHandler(on_hist, pattern=r"^h(v|e|d|nop)"))
     app.add_handler(MessageHandler(filters.Text([HISTORY_BTN]), show_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_link))
     return app

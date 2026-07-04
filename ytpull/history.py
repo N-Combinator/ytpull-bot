@@ -13,7 +13,7 @@ import sqlite3
 import threading
 
 HEADER = "📥 История загрузок"
-_MAX_LEN = 4000  # keep under Telegram's 4096-char message limit
+PAGE_SIZE = 10  # history entries shown per page
 
 
 class HistoryDB:
@@ -84,30 +84,37 @@ class HistoryDB:
                 (record_id, chat_id),
             )
 
-    def render(self, chat_id: int) -> str:
-        with self._connect() as c:
-            rows = c.execute(
-                "SELECT num, channel, title FROM downloads WHERE chat_id = ? ORDER BY id",
-                (chat_id,),
-            ).fetchall()
-        # Group by channel, most-recently-active channel first.
-        order: list[str] = []
-        groups: dict[str, list[sqlite3.Row]] = {}
-        for r in rows:
-            groups.setdefault(r["channel"], []).append(r)
-            if r["channel"] in order:
-                order.remove(r["channel"])
-            order.append(r["channel"])
+    def page_count(self, chat_id: int) -> int:
+        n = len(self.records(chat_id))
+        return max(1, (n + PAGE_SIZE - 1) // PAGE_SIZE)
 
-        while True:
-            blocks = [HEADER, ""]
-            for chan in reversed(order):
-                blocks.append(f"#{chan}:")
-                for r in reversed(groups[chan]):
-                    blocks.append(f"  • #N{r['num']:04d} — {r['title']}")
-                blocks.append("")
-            text = "\n".join(blocks).strip()
-            if len(text) <= _MAX_LEN or len(order) <= 1:
-                return text
-            drop = order.pop(0)  # trim oldest channel until it fits
-            groups.pop(drop, None)
+    def page_records(self, chat_id: int, page: int) -> list[dict]:
+        """The (clamped) page's records, newest first."""
+        recs = self.records(chat_id)
+        page = max(0, min(page, self._pages(len(recs)) - 1))
+        return recs[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+    @staticmethod
+    def _pages(n: int) -> int:
+        return max(1, (n + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def render_page(self, chat_id: int, page: int) -> tuple[str, int, int]:
+        """Render one page of history. Returns (text, total_pages, clamped_page)."""
+        recs = self.records(chat_id)  # newest first
+        pages = self._pages(len(recs))
+        page = max(0, min(page, pages - 1))
+        chunk = recs[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+        # Group the page's rows by channel, in order of first appearance.
+        order: list[str] = []
+        groups: dict[str, list[dict]] = {}
+        for r in chunk:
+            groups.setdefault(r["channel"], []).append(r)
+            if r["channel"] not in order:
+                order.append(r["channel"])
+        blocks = [f"{HEADER}  (стр. {page + 1}/{pages})", ""]
+        for chan in order:
+            blocks.append(f"#{chan}:")
+            for r in groups[chan]:
+                blocks.append(f"  • #N{r['num']:04d} — {r['title']}")
+            blocks.append("")
+        return "\n".join(blocks).strip(), pages, page
