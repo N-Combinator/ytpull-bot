@@ -1,12 +1,10 @@
-"""Per-chat download history, persisted in SQLite and mirrored to a pinned message.
+"""Per-chat download history, persisted in SQLite.
 
-Telegram has no way to deep-link a message inside a private (1:1) chat, so instead
-each downloaded document is stamped with a sequential number as a hashtag (e.g.
-``#0007``) in its caption. The pinned history lists those numbers next to the video
-title, grouped by channel — tapping/searching ``#0007`` jumps to the document.
-
-Everything lives in SQLite so history (and the pinned-message id) survives restarts
-and redeploys; nothing is kept only in process memory.
+Each downloaded document is stamped with a sequential number as a hashtag (e.g.
+``#0007``) in its caption. The history is shown on demand (via a reply-keyboard
+button) as a message listing those numbers next to the video title, grouped by
+channel — tapping/searching ``#0007`` jumps to the document. Entries can be deleted
+from an edit view. Everything lives in SQLite so history survives restarts.
 """
 
 from __future__ import annotations
@@ -59,8 +57,8 @@ class HistoryDB:
             ).fetchone()[0]
 
     def record(self, chat_id: int, num: int, channel: str, title: str,
-               quality: str, url: str, doc_message_id: int | None) -> str:
-        """Save a download to history; return the rendered pinned text."""
+               quality: str, url: str, doc_message_id: int | None) -> None:
+        """Save a download to history."""
         with self._lock, self._connect() as c:
             c.execute(
                 "INSERT INTO downloads"
@@ -68,21 +66,22 @@ class HistoryDB:
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (chat_id, num, channel, title, quality, url, doc_message_id),
             )
-        return self.render(chat_id)
 
-    def pinned_id(self, chat_id: int) -> int | None:
+    def records(self, chat_id: int) -> list[dict]:
+        """All history rows for a chat, newest first (for the edit list)."""
         with self._connect() as c:
-            row = c.execute(
-                "SELECT pinned_message_id FROM chats WHERE chat_id = ?", (chat_id,)
-            ).fetchone()
-            return row["pinned_message_id"] if row else None
+            rows = c.execute(
+                "SELECT id, num, channel, title FROM downloads"
+                " WHERE chat_id = ? ORDER BY id DESC",
+                (chat_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
-    def set_pinned(self, chat_id: int, message_id: int | None) -> None:
+    def delete(self, chat_id: int, record_id: int) -> None:
         with self._lock, self._connect() as c:
             c.execute(
-                "INSERT INTO chats (chat_id, pinned_message_id) VALUES (?, ?)"
-                " ON CONFLICT(chat_id) DO UPDATE SET pinned_message_id = excluded.pinned_message_id",
-                (chat_id, message_id),
+                "DELETE FROM downloads WHERE id = ? AND chat_id = ?",
+                (record_id, chat_id),
             )
 
     def render(self, chat_id: int) -> str:

@@ -8,7 +8,13 @@ import os
 import re
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -46,6 +52,12 @@ CACHE = "cache"
 FFMPEG = "ffmpeg"
 AUTH = "auth"
 HISTORY = "history"
+
+# Persistent reply-keyboard button that shows the download history on demand.
+HISTORY_BTN = "📥 История скачивания"
+KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton(HISTORY_BTN)]], resize_keyboard=True, is_persistent=True
+)
 
 
 def _render_bar(pct: int, width: int = 12) -> str:
@@ -136,7 +148,7 @@ async def _ensure_access(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool
     text = (update.message.text or "") if update.message else ""
     if store.check_password(text):
         store.authorize(uid)
-        await update.message.reply_text(messages.ACCESS_GRANTED)
+        await update.message.reply_text(messages.ACCESS_GRANTED, reply_markup=KEYBOARD)
         try:
             await ctx.bot.delete_message(update.message.chat_id, update.message.message_id)
         except Exception:  # noqa: BLE001
@@ -149,7 +161,7 @@ async def _ensure_access(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     store: AuthStore = ctx.application.bot_data[AUTH]
     if store.is_authorized(update.effective_user.id):
-        await update.message.reply_text(messages.START)
+        await update.message.reply_text(messages.START, reply_markup=KEYBOARD)
     else:
         await update.message.reply_text(messages.NEED_PASSWORD)
 
@@ -169,7 +181,7 @@ async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     url = match.group(0)
     cfg: Config = ctx.application.bot_data[CFG]
 
-    status = await update.message.reply_text(messages.EXTRACTING)
+    status = await update.message.reply_text(messages.EXTRACTING, reply_markup=KEYBOARD)
     try:
         info = await extract_info(url, cookiefile=cfg.cookies_file)
     except DownloadError as exc:
@@ -330,12 +342,10 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:  # noqa: BLE001
                 pass
         offer = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Да", callback_data=f"hist:{token}:{key}"),
-            InlineKeyboardButton("Нет", callback_data="hist:no"),
+            InlineKeyboardButton("Да", callback_data=f"save:{token}:{key}"),
+            InlineKeyboardButton("Нет", callback_data="save:no"),
         ]])
-        await _safe_edit_markup(
-            query.message, "🗂 Сохранить в историю? (закреплённое сообщение чата)", offer
-        )
+        await _safe_edit_markup(query.message, "🗂 Сохранить в историю?", offer)
     except DownloadError as exc:
         await query.edit_message_text(messages.classify_error(exc))
     except Exception as exc:  # noqa: BLE001
@@ -349,30 +359,13 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
 
 
-async def _update_pinned(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
-    """Edit the chat's pinned history message, (re)creating and pinning if needed."""
-    hist: HistoryDB = ctx.application.bot_data[HISTORY]
-    pinned_id = hist.pinned_id(chat_id)
-    if pinned_id:
-        try:
-            await ctx.bot.edit_message_text(text, chat_id=chat_id, message_id=pinned_id)
-            return
-        except Exception:  # noqa: BLE001 - pinned message gone; fall through to recreate
-            hist.set_pinned(chat_id, None)
-    msg = await ctx.bot.send_message(chat_id, text)
-    try:
-        await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
-    except Exception:  # noqa: BLE001 - pin not critical, keep the message anyway
-        pass
-    hist.set_pinned(chat_id, msg.message_id)
-
-
-async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Answer the post-download 'save to history?' offer (Да/Нет)."""
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat_id
 
-    if query.data == "hist:no":
+    if query.data == "save:no":
         await query.message.delete()
         return
 
@@ -385,12 +378,70 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         entry = None
     if entry is not None and entry.num is not None:
         channel = _channel_tag(entry.info) or "unknown"
-        text = hist.record(
+        hist.record(
             chat_id, entry.num, channel, entry.title,
             entry.quality or "", entry.url, entry.doc_message_id,
         )
-        await _update_pinned(ctx, chat_id, text)
     await query.message.delete()
+
+
+async def show_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the 'История скачивания' reply-keyboard button."""
+    store: AuthStore = ctx.application.bot_data[AUTH]
+    if not store.is_authorized(update.effective_user.id):
+        await update.message.reply_text(messages.NEED_PASSWORD)
+        return
+    hist: HistoryDB = ctx.application.bot_data[HISTORY]
+    text = hist.render(update.message.chat_id)
+    if not hist.records(update.message.chat_id):
+        await update.message.reply_text("История пуста.", reply_markup=KEYBOARD)
+        return
+    markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✏️ Редактировать", callback_data="hedit")]]
+    )
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+def _edit_markup(records: list[dict]) -> InlineKeyboardMarkup:
+    """One delete button per history row, plus a Готово button."""
+    rows = [
+        [InlineKeyboardButton(f"✖️ #{r['num']:04d} {r['title']}"[:60],
+                              callback_data=f"hdel:{r['id']}")]
+        for r in records
+    ]
+    rows.append([InlineKeyboardButton("Готово", callback_data="hdone")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def on_hist_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit view for the history: delete individual entries."""
+    query = update.callback_query
+    await query.answer()
+    hist: HistoryDB = ctx.application.bot_data[HISTORY]
+    chat_id = query.message.chat_id
+
+    if query.data == "hdone":
+        text = hist.render(chat_id)
+        if hist.records(chat_id):
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✏️ Редактировать", callback_data="hedit")]]
+            )
+            await _safe_edit_markup(query.message, text, markup)
+        else:
+            await _safe_edit(query.message, "История пуста.")
+        return
+
+    if query.data.startswith("hdel:"):
+        try:
+            hist.delete(chat_id, int(query.data.split(":", 1)[1]))
+        except (ValueError, IndexError):
+            pass
+
+    records = hist.records(chat_id)
+    if not records:
+        await _safe_edit(query.message, "История пуста.")
+        return
+    await _safe_edit_markup(query.message, "Удалить записи:", _edit_markup(records))
 
 
 def build_application(cfg: Config) -> Application:
@@ -409,6 +460,8 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(on_choice, pattern=r"^dl:"))
-    app.add_handler(CallbackQueryHandler(on_history, pattern=r"^hist:"))
+    app.add_handler(CallbackQueryHandler(on_save, pattern=r"^save:"))
+    app.add_handler(CallbackQueryHandler(on_hist_edit, pattern=r"^h(edit|del|done)"))
+    app.add_handler(MessageHandler(filters.Text([HISTORY_BTN]), show_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_link))
     return app
