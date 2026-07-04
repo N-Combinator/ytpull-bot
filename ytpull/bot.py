@@ -51,6 +51,22 @@ async def _safe_edit(message, text: str) -> None:
     except Exception:  # noqa: BLE001 - progress edits are best-effort
         pass
 
+
+def _channel_tag(info: dict) -> str:
+    """A Telegram-hashtag-safe slug of the channel name (spaces -> underscore)."""
+    name = (info.get("uploader") or info.get("channel") or "").strip()
+    return re.sub(r"\W+", "_", name, flags=re.UNICODE).strip("_")
+
+
+def _caption(entry, quality_label: str, bot_username: str) -> str:
+    """Document caption: title, channel hashtag, and @bot: quality."""
+    lines = [f"🎥 {entry.title}"]
+    tag = _channel_tag(entry.info)
+    if tag:
+        lines.append(f"👤 #{tag}")
+    lines.append(f"@{bot_username}: 🎥 {quality_label}")
+    return "\n".join(lines)
+
 # Uploading a multi-hundred-MB / multi-GB file to the (local) Bot API server takes
 # minutes; the python-telegram-bot default read/write timeouts (~5s) fire long
 # before the server finishes ingesting the upload, raising TimedOut even though the
@@ -239,32 +255,31 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         await query.edit_message_text(messages.UPLOADING)
+        chat_id = query.message.chat_id
+        caption = _caption(entry, opt.label, ctx.bot.username)
         with open(path, "rb") as fh:
             if opt.kind == "audio":
                 await ctx.bot.send_audio(
-                    query.message.chat_id, fh, title=entry.title, **UPLOAD_TIMEOUTS
+                    chat_id, fh, title=entry.title, caption=caption, **UPLOAD_TIMEOUTS
                 )
             else:
-                # EXPERIMENT (Nikolay's hypothesis): send video as a document rather
-                # than send_video — Telegram then won't try to inline-decode the
-                # stream (AV1) and hands the raw file to the phone's native player on
-                # open. Does NOT change the codec; revert to send_video if it doesn't
-                # help (send_video keeps in-app preview/streaming, document does not).
+                # Sent as a document (not send_video): Telegram hands the raw file to
+                # the phone's native player instead of inline-decoding it — which is
+                # what makes AV1/high-res clips play on iOS.
                 ext = os.path.splitext(path)[1] or ".mp4"
                 safe = re.sub(r"[^\w\-]+", "_", entry.title).strip("_")[:60] or "video"
                 await ctx.bot.send_document(
-                    query.message.chat_id,
-                    fh,
-                    filename=f"{safe}{ext}",
-                    caption=entry.title,
-                    **UPLOAD_TIMEOUTS,
+                    chat_id, fh, filename=f"{safe}{ext}", caption=caption, **UPLOAD_TIMEOUTS
                 )
-        await query.edit_message_text(f"✅ Готово: {entry.title}")
-        # Clean up the user's original link message so the chat doesn't fill with
-        # links. In a private chat a bot may delete the other party's messages.
+        # No textual confirmation: drop our own progress/menu message and the user's
+        # original link, so only the delivered file is left in the chat.
+        try:
+            await query.message.delete()
+        except Exception:  # noqa: BLE001
+            pass
         if entry.user_msg_id:
             try:
-                await ctx.bot.delete_message(query.message.chat_id, entry.user_msg_id)
+                await ctx.bot.delete_message(chat_id, entry.user_msg_id)
             except Exception:  # noqa: BLE001
                 pass
     except DownloadError as exc:
