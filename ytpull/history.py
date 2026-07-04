@@ -104,7 +104,7 @@ class HistoryDB:
             for chan in reversed(order):
                 blocks.append(f"#{chan}:")
                 for r in reversed(groups[chan]):
-                    blocks.append(f"  • #{r['num']:04d} — {r['title']}")
+                    blocks.append(f"  • #N{r['num']:04d} — {r['title']}")
                 blocks.append("")
             text = "\n".join(blocks).strip()
             if len(text) <= _MAX_LEN or len(order) <= 1:

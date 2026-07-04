@@ -96,7 +96,7 @@ def _title_tag(title: str) -> str:
 def _caption(entry, quality_label: str, bot_username: str, num: int, url: str) -> str:
     """Document caption: title, channel + #number, @bot: quality, source link."""
     tag = _channel_tag(entry.info)
-    ids = "  ·  ".join(([f"#{tag}"] if tag else []) + [f"#{num:04d}"])
+    ids = "  ·  ".join(([f"#{tag}"] if tag else []) + [f"#N{num:04d}"])
     lines = [f"🎥 {entry.title}", f"👤 {ids}", f"@{bot_username}: 🎥 {quality_label}"]
     if url:
         lines.append(f"🔗 {url}")
@@ -405,7 +405,7 @@ async def show_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 def _edit_markup(records: list[dict]) -> InlineKeyboardMarkup:
     """One delete button per history row, plus a Готово button."""
     rows = [
-        [InlineKeyboardButton(f"✖️ #{r['num']:04d} {r['title']}"[:60],
+        [InlineKeyboardButton(f"✖️ #N{r['num']:04d} {r['title']}"[:60],
                               callback_data=f"hdel:{r['id']}")]
         for r in records
     ]
