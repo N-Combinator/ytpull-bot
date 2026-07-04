@@ -19,6 +19,8 @@ import sqlite3
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ytpull.config import load_config
