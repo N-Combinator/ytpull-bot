@@ -22,10 +22,24 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-async def extract_info(url: str) -> dict[str, Any]:
+def _with_cookies(opts: dict[str, Any], cookiefile: str | None) -> dict[str, Any]:
+    """Attach a cookies file to yt-dlp opts if one is configured and present.
+
+    YouTube increasingly gates extraction behind a 'confirm you're not a bot'
+    check on server IPs; authenticated cookies are the reliable way past it.
+    """
+    if cookiefile and os.path.exists(cookiefile):
+        opts["cookiefile"] = cookiefile
+    return opts
+
+
+async def extract_info(url: str, cookiefile: str | None = None) -> dict[str, Any]:
     """Fetch metadata + available formats without downloading."""
     def _run() -> dict[str, Any]:
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
+        opts = _with_cookies(
+            {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True},
+            cookiefile,
+        )
         with YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
 
@@ -38,13 +52,14 @@ async def download(
     outdir: str,
     to_audio: bool = False,
     progress: Callable[[dict], None] | None = None,
+    cookiefile: str | None = None,
 ) -> str:
     """Download `url` with the given format selector; return the output path."""
     job_id = uuid.uuid4().hex[:8]
     outtmpl = os.path.join(outdir, f"{job_id}.%(ext)s")
 
     def _run() -> str:
-        opts: dict[str, Any] = {
+        opts: dict[str, Any] = _with_cookies({
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
@@ -52,7 +67,7 @@ async def download(
             "outtmpl": outtmpl,
             "merge_output_format": "mp4",
             "restrictfilenames": True,
-        }
+        }, cookiefile)
         if progress is not None:
             opts["progress_hooks"] = [progress]
         if to_audio:

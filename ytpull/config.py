@@ -20,6 +20,7 @@ class Config:
     download_dir: str
     log_level: str
     auth_seed: str  # secret seed for the access-password gate ("" disables the gate)
+    cookies_file: str  # path to a Netscape cookies.txt for yt-dlp ("" = none)
 
     @property
     def upload_limit(self) -> int:
@@ -49,10 +50,13 @@ def load_config() -> Config:
 
     auth_seed = os.environ.get("AUTH_SEED", "").strip()
 
+    cookies_file = os.environ.get("COOKIES_FILE", "").strip()
+
     return Config(
         bot_token=token,
         api_base=api_base,
         download_dir=download_dir,
         log_level=log_level,
         auth_seed=auth_seed,
+        cookies_file=cookies_file,
     )

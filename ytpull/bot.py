@@ -144,10 +144,11 @@ async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(messages.NOT_A_LINK)
         return
     url = match.group(0)
+    cfg: Config = ctx.application.bot_data[CFG]
 
     status = await update.message.reply_text(messages.EXTRACTING)
     try:
-        info = await extract_info(url)
+        info = await extract_info(url, cookiefile=cfg.cookies_file)
     except DownloadError as exc:
         await status.edit_text(messages.classify_error(exc))
         return
@@ -243,6 +244,7 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             cfg.download_dir,
             to_audio=(opt.kind == "audio"),
             progress=hook,
+            cookiefile=cfg.cookies_file,
         )
 
         size = os.path.getsize(path)

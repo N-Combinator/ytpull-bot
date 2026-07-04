@@ -38,6 +38,11 @@ def classify_error(exc: Exception) -> str:
     """Map a yt-dlp / download exception to a friendly Russian message."""
     text = str(exc).lower()
 
+    if "not a bot" in text or "sign in to confirm" in text or "cookies" in text:
+        return (
+            "🔐 YouTube временно требует подтверждение (анти-бот проверка сервера). "
+            "Мы уже чиним — попробуй позже."
+        )
     if "private" in text:
         return "🔒 Это приватное видео — скачать нельзя."
     if "sign in to confirm your age" in text or "age" in text and "restrict" in text:
