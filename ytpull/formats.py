@@ -46,6 +46,21 @@ def _has_video(f: dict) -> bool:
     return f.get("vcodec") not in (None, "none")
 
 
+def _pick_video(bucket: list[dict]) -> dict:
+    """The format `selector_for` will actually download at this height.
+
+    Mirror the selector's preference (avc1 first) and — crucially for the size
+    estimate — prefer formats that carry a REAL filesize, so a premium/unavailable
+    stream with only a bitrate doesn't blow the estimate up (yt-dlp won't pick it
+    either). Among the candidates, highest bitrate wins, like yt-dlp's `bestvideo`.
+    """
+    avc1 = [f for f in bucket if (f.get("vcodec") or "").startswith("avc1")]
+    pool = avc1 or bucket
+    real = [f for f in pool if (f.get("filesize") or f.get("filesize_approx"))]
+    chooser = real or pool
+    return max(chooser, key=lambda f: f.get("tbr") or 0)
+
+
 def parse_options(info: dict, ffmpeg_available: bool) -> list[QualityOption]:
     """Build the quality menu from an extracted-info dict."""
     formats = info.get("formats") or []
@@ -73,17 +88,18 @@ def parse_options(info: dict, ffmpeg_available: bool) -> list[QualityOption]:
             continue
         bucket = by_height[h]
         has_h264 = any((f.get("vcodec") or "").startswith("avc1") for f in bucket)
-        progressive = [f for f in bucket if _has_audio(f)]
-        if progressive:
-            best = max(progressive, key=lambda f: _size(f, duration) or 0)
-            est = _size(best, duration)
-        else:
-            # Video-only at this height needs an ffmpeg merge with the audio track.
-            if not ffmpeg_available:
-                continue
-            best = max(bucket, key=lambda f: _size(f, duration) or 0)
+        video_only = [f for f in bucket if not _has_audio(f)]
+        if video_only and ffmpeg_available:
+            # We merge the best video-only stream with a separate audio track, so
+            # the estimate is that video's size plus the audio's.
+            best = _pick_video(video_only)
             vsize = _size(best, duration)
             est = (vsize + audio_size) if (vsize and audio_size) else vsize
+        else:
+            progressive = [f for f in bucket if _has_audio(f)]
+            if not progressive:
+                continue
+            est = _size(_pick_video(progressive), duration)
         options.append(
             QualityOption(key=f"v{h}", label=f"{h}p", est_size=est, kind="video", h264=has_h264)
         )
