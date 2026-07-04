@@ -24,6 +24,7 @@ from .cache import ExtractCache
 from .config import Config
 from .downloader import DownloadError, download, extract_info, ffmpeg_available
 from .formats import human_size, parse_options, selector_for
+from .history import HistoryStore
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ CFG = "config"
 CACHE = "cache"
 FFMPEG = "ffmpeg"
 AUTH = "auth"
+HISTORY = "history"
 
 
 def _render_bar(pct: int, width: int = 12) -> str:
@@ -52,10 +54,24 @@ async def _safe_edit(message, text: str) -> None:
         pass
 
 
+async def _safe_edit_markup(message, text: str, markup) -> None:
+    try:
+        await message.edit_text(text, reply_markup=markup)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _slug(name: str, maxlen: int = 64) -> str:
+    """Telegram-hashtag-safe slug: non-word runs -> underscore (Unicode-aware)."""
+    return re.sub(r"\W+", "_", name, flags=re.UNICODE).strip("_")[:maxlen].strip("_")
+
+
 def _channel_tag(info: dict) -> str:
-    """A Telegram-hashtag-safe slug of the channel name (spaces -> underscore)."""
-    name = (info.get("uploader") or info.get("channel") or "").strip()
-    return re.sub(r"\W+", "_", name, flags=re.UNICODE).strip("_")
+    return _slug((info.get("uploader") or info.get("channel") or "").strip())
+
+
+def _title_tag(title: str) -> str:
+    return _slug(title) or "video"
 
 
 def _caption(entry, quality_label: str, bot_username: str) -> str:
@@ -273,17 +289,18 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 await ctx.bot.send_document(
                     chat_id, fh, filename=f"{safe}{ext}", caption=caption, **UPLOAD_TIMEOUTS
                 )
-        # No textual confirmation: drop our own progress/menu message and the user's
-        # original link, so only the delivered file is left in the chat.
-        try:
-            await query.message.delete()
-        except Exception:  # noqa: BLE001
-            pass
+        # No "done" text. Drop the user's original link, and turn our own message
+        # into a compact "add to history?" offer (buttons vanish with it on choice).
         if entry.user_msg_id:
             try:
                 await ctx.bot.delete_message(chat_id, entry.user_msg_id)
             except Exception:  # noqa: BLE001
                 pass
+        offer = InlineKeyboardMarkup([[
+            InlineKeyboardButton("➕ В историю", callback_data=f"hist:{token}:{key}"),
+            InlineKeyboardButton("✖️", callback_data="hist:no"),
+        ]])
+        await _safe_edit_markup(query.message, "Сохранить в историю?", offer)
     except DownloadError as exc:
         await query.edit_message_text(messages.classify_error(exc))
     except Exception as exc:  # noqa: BLE001
@@ -297,6 +314,49 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
 
 
+async def _update_pinned(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+    """Edit the chat's pinned history message, (re)creating and pinning if needed."""
+    hist: HistoryStore = ctx.application.bot_data[HISTORY]
+    pinned_id = hist.pinned_id(chat_id)
+    if pinned_id:
+        try:
+            await ctx.bot.edit_message_text(text, chat_id=chat_id, message_id=pinned_id)
+            return
+        except Exception:  # noqa: BLE001 - pinned message gone; fall through to recreate
+            hist.set_pinned(chat_id, None)
+    msg = await ctx.bot.send_message(chat_id, text)
+    try:
+        await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
+    except Exception:  # noqa: BLE001 - pin not critical, keep the message anyway
+        pass
+    hist.set_pinned(chat_id, msg.message_id)
+
+
+async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+
+    if query.data == "hist:no":
+        await query.message.delete()
+        return
+
+    try:
+        _, token, _key = query.data.split(":", 2)
+    except ValueError:
+        await query.message.delete()
+        return
+
+    cache: ExtractCache = ctx.application.bot_data[CACHE]
+    hist: HistoryStore = ctx.application.bot_data[HISTORY]
+    entry = cache.get(token)
+    if entry is not None:
+        channel = _channel_tag(entry.info) or "unknown"
+        text = hist.add(chat_id, channel, _title_tag(entry.title))
+        await _update_pinned(ctx, chat_id, text)
+    await query.message.delete()
+
+
 def build_application(cfg: Config) -> Application:
     builder = Application.builder().token(cfg.bot_token)
     if cfg.api_base:
@@ -306,11 +366,13 @@ def build_application(cfg: Config) -> Application:
     app.bot_data[CFG] = cfg
     app.bot_data[CACHE] = ExtractCache()
     app.bot_data[FFMPEG] = ffmpeg_available()
-    auth_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "authorized.json")
-    app.bot_data[AUTH] = AuthStore(cfg.auth_seed, auth_path)
+    root = os.path.dirname(os.path.dirname(__file__))
+    app.bot_data[AUTH] = AuthStore(cfg.auth_seed, os.path.join(root, "authorized.json"))
+    app.bot_data[HISTORY] = HistoryStore(os.path.join(root, "history.json"))
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(on_choice, pattern=r"^dl:"))
+    app.add_handler(CallbackQueryHandler(on_history, pattern=r"^hist:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_link))
     return app
