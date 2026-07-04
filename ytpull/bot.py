@@ -22,9 +22,9 @@ from . import messages
 from .auth import AuthStore
 from .cache import ExtractCache
 from .config import Config
-from .downloader import DownloadError, download, extract_info, ffmpeg_available
+from .downloader import DownloadError, download, extract_info, ffmpeg_available, probe_height
 from .formats import human_size, parse_options, selector_for
-from .history import HistoryStore
+from .history import HistoryDB
 
 log = logging.getLogger(__name__)
 
@@ -74,13 +74,13 @@ def _title_tag(title: str) -> str:
     return _slug(title) or "video"
 
 
-def _caption(entry, quality_label: str, bot_username: str) -> str:
-    """Document caption: title, channel hashtag, and @bot: quality."""
-    lines = [f"🎥 {entry.title}"]
+def _caption(entry, quality_label: str, bot_username: str, num: int, url: str) -> str:
+    """Document caption: title, channel + #number, @bot: quality, source link."""
     tag = _channel_tag(entry.info)
-    if tag:
-        lines.append(f"👤 #{tag}")
-    lines.append(f"@{bot_username}: 🎥 {quality_label}")
+    ids = "  ·  ".join(([f"#{tag}"] if tag else []) + [f"#{num:04d}"])
+    lines = [f"🎥 {entry.title}", f"👤 {ids}", f"@{bot_username}: 🎥 {quality_label}"]
+    if url:
+        lines.append(f"🔗 {url}")
     return "\n".join(lines)
 
 # Uploading a multi-hundred-MB / multi-GB file to the (local) Bot API server takes
@@ -274,10 +274,20 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.edit_message_text(messages.UPLOADING)
         chat_id = query.message.chat_id
-        caption = _caption(entry, opt.label, ctx.bot.username)
+        history: HistoryDB = ctx.application.bot_data[HISTORY]
+
+        # Real quality from the file (avc1 fallback may differ from the picked tier).
+        if opt.kind == "audio":
+            quality = opt.label
+        else:
+            real_h = probe_height(path)
+            quality = f"{real_h}p" if real_h else opt.label
+
+        num = history.next_number(chat_id)
+        caption = _caption(entry, quality, ctx.bot.username, num, entry.url)
         with open(path, "rb") as fh:
             if opt.kind == "audio":
-                await ctx.bot.send_audio(
+                sent = await ctx.bot.send_audio(
                     chat_id, fh, title=entry.title, caption=caption, **UPLOAD_TIMEOUTS
                 )
             else:
@@ -286,9 +296,11 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 # what makes AV1/high-res clips play on iOS.
                 ext = os.path.splitext(path)[1] or ".mp4"
                 safe = re.sub(r"[^\w\-]+", "_", entry.title).strip("_")[:60] or "video"
-                await ctx.bot.send_document(
+                sent = await ctx.bot.send_document(
                     chat_id, fh, filename=f"{safe}{ext}", caption=caption, **UPLOAD_TIMEOUTS
                 )
+        entry.num, entry.quality = num, quality
+        entry.doc_message_id = sent.message_id
         # No "done" text. Drop the user's original link, and turn our own message
         # into a compact "add to history?" offer (buttons vanish with it on choice).
         if entry.user_msg_id:
@@ -318,20 +330,15 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _update_pinned(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
     """Edit the chat's pinned history message, (re)creating and pinning if needed."""
-    hist: HistoryStore = ctx.application.bot_data[HISTORY]
+    hist: HistoryDB = ctx.application.bot_data[HISTORY]
     pinned_id = hist.pinned_id(chat_id)
     if pinned_id:
         try:
-            await ctx.bot.edit_message_text(
-                text, chat_id=chat_id, message_id=pinned_id,
-                parse_mode="HTML", disable_web_page_preview=True,
-            )
+            await ctx.bot.edit_message_text(text, chat_id=chat_id, message_id=pinned_id)
             return
         except Exception:  # noqa: BLE001 - pinned message gone; fall through to recreate
             hist.set_pinned(chat_id, None)
-    msg = await ctx.bot.send_message(
-        chat_id, text, parse_mode="HTML", disable_web_page_preview=True
-    )
+    msg = await ctx.bot.send_message(chat_id, text)
     try:
         await ctx.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
     except Exception:  # noqa: BLE001 - pin not critical, keep the message anyway
@@ -348,18 +355,19 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.message.delete()
         return
 
+    cache: ExtractCache = ctx.application.bot_data[CACHE]
+    hist: HistoryDB = ctx.application.bot_data[HISTORY]
     try:
         _, token, _key = query.data.split(":", 2)
+        entry = cache.get(token)
     except ValueError:
-        await query.message.delete()
-        return
-
-    cache: ExtractCache = ctx.application.bot_data[CACHE]
-    hist: HistoryStore = ctx.application.bot_data[HISTORY]
-    entry = cache.get(token)
-    if entry is not None:
+        entry = None
+    if entry is not None and entry.num is not None:
         channel = _channel_tag(entry.info) or "unknown"
-        text = hist.add(chat_id, channel, entry.title, entry.url)
+        text = hist.record(
+            chat_id, entry.num, channel, entry.title,
+            entry.quality or "", entry.url, entry.doc_message_id,
+        )
         await _update_pinned(ctx, chat_id, text)
     await query.message.delete()
 
@@ -375,7 +383,7 @@ def build_application(cfg: Config) -> Application:
     app.bot_data[FFMPEG] = ffmpeg_available()
     root = os.path.dirname(os.path.dirname(__file__))
     app.bot_data[AUTH] = AuthStore(cfg.auth_seed, os.path.join(root, "authorized.json"))
-    app.bot_data[HISTORY] = HistoryStore(os.path.join(root, "history.json"))
+    app.bot_data[HISTORY] = HistoryDB(os.path.join(root, "history.db"))
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

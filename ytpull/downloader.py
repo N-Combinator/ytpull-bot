@@ -22,6 +22,21 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def probe_height(path: str) -> int | None:
+    """Real video height of a downloaded file via ffprobe (None if unknown/audio)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return int(out) if out.isdigit() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _with_cookies(opts: dict[str, Any], cookiefile: str | None) -> dict[str, Any]:
     """Attach a cookies file to yt-dlp opts if one is configured and present.
 

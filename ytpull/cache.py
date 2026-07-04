@@ -20,6 +20,10 @@ class Entry:
     info: dict[str, Any]
     options: list[Any]
     user_msg_id: int | None = None  # the user's original link message, to delete after send
+    # Filled in after a successful send, for the "save to history" callback:
+    num: int | None = None
+    quality: str | None = None
+    doc_message_id: int | None = None
     created: float = field(default_factory=time.monotonic)
 
 
