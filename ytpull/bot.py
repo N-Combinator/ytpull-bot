@@ -80,17 +80,16 @@ async def _safe_edit_markup(message, text: str, markup) -> None:
         pass
 
 
-HIST_MSG = "hist_msg"  # ctx.chat_data key: id of the currently shown history message
-
-
 async def _clear_history_msg(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """Delete the previously shown history message so it stops polluting search."""
-    mid = ctx.chat_data.pop(HIST_MSG, None)
+    hist: HistoryDB = ctx.application.bot_data[HISTORY]
+    mid = hist.hist_message_id(chat_id)
     if mid:
         try:
             await ctx.bot.delete_message(chat_id, mid)
         except Exception:  # noqa: BLE001
             pass
+        hist.set_hist_message_id(chat_id, None)
 
 
 def _slug(name: str, maxlen: int = 64) -> str:
@@ -445,12 +444,17 @@ async def show_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     hist: HistoryDB = ctx.application.bot_data[HISTORY]
     chat_id = update.message.chat_id
     await _clear_history_msg(ctx, chat_id)  # replace any previous history message
+    # Delete the button-press message itself so it doesn't pile up in the chat.
+    try:
+        await update.message.delete()
+    except Exception:  # noqa: BLE001
+        pass
     if not hist.records(chat_id):
-        await update.message.reply_text("История пуста.", reply_markup=KEYBOARD)
-        return
-    text, pages, page = hist.render_page(chat_id, 0)
-    sent = await update.message.reply_text(text, reply_markup=_view_kb(page, pages))
-    ctx.chat_data[HIST_MSG] = sent.message_id
+        sent = await ctx.bot.send_message(chat_id, "История пуста.", reply_markup=KEYBOARD)
+    else:
+        text, pages, page = hist.render_page(chat_id, 0)
+        sent = await ctx.bot.send_message(chat_id, text, reply_markup=_view_kb(page, pages))
+    hist.set_hist_message_id(chat_id, sent.message_id)
 
 
 async def on_hist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

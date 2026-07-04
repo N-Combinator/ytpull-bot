@@ -116,6 +116,9 @@ async def main(url: str) -> None:
     before = len(db.records(999))
     db.delete(999, db.records(999)[0]["id"])
     check(len(db.records(999)) == before - 1, "delete removes a record")
+    db.set_hist_message_id(999, 555)
+    check(HistoryDB(hpath).hist_message_id(999) == 555,
+          "hist_message_id persists in DB across reopen")
 
     # cleanup
     for p in (path, hpath):

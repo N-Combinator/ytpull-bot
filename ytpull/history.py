@@ -25,8 +25,13 @@ class HistoryDB:
                 "CREATE TABLE IF NOT EXISTS chats ("
                 " chat_id INTEGER PRIMARY KEY,"
                 " pinned_message_id INTEGER,"
-                " last_num INTEGER NOT NULL DEFAULT 0)"
+                " last_num INTEGER NOT NULL DEFAULT 0,"
+                " hist_message_id INTEGER)"
             )
+            # Migrate older DBs that predate the hist_message_id column.
+            cols = [r[1] for r in c.execute("PRAGMA table_info(chats)").fetchall()]
+            if "hist_message_id" not in cols:
+                c.execute("ALTER TABLE chats ADD COLUMN hist_message_id INTEGER")
             c.execute(
                 "CREATE TABLE IF NOT EXISTS downloads ("
                 " id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -55,6 +60,21 @@ class HistoryDB:
             return c.execute(
                 "SELECT last_num FROM chats WHERE chat_id = ?", (chat_id,)
             ).fetchone()[0]
+
+    def hist_message_id(self, chat_id: int) -> int | None:
+        with self._connect() as c:
+            row = c.execute(
+                "SELECT hist_message_id FROM chats WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+            return row["hist_message_id"] if row else None
+
+    def set_hist_message_id(self, chat_id: int, message_id: int | None) -> None:
+        with self._lock, self._connect() as c:
+            c.execute(
+                "INSERT INTO chats (chat_id, hist_message_id) VALUES (?, ?)"
+                " ON CONFLICT(chat_id) DO UPDATE SET hist_message_id = excluded.hist_message_id",
+                (chat_id, message_id),
+            )
 
     def record(self, chat_id: int, num: int, channel: str, title: str,
                quality: str, url: str, doc_message_id: int | None) -> None:
