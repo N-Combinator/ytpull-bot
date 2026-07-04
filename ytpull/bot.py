@@ -181,7 +181,9 @@ async def on_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     url = match.group(0)
     cfg: Config = ctx.application.bot_data[CFG]
 
-    status = await update.message.reply_text(messages.EXTRACTING, reply_markup=KEYBOARD)
+    # NB: no reply_markup here — this message is later edited into the quality menu
+    # (an inline keyboard), and a message carrying a reply-keyboard can't be edited.
+    status = await update.message.reply_text(messages.EXTRACTING)
     try:
         info = await extract_info(url, cookiefile=cfg.cookies_file)
     except DownloadError as exc:
@@ -311,7 +313,7 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 if opt.kind == "audio":
                     sent = await ctx.bot.send_audio(
                         chat_id, fh, title=entry.title, caption=caption,
-                        thumbnail=thumb_fh, **UPLOAD_TIMEOUTS,
+                        thumbnail=thumb_fh, reply_markup=KEYBOARD, **UPLOAD_TIMEOUTS,
                     )
                 else:
                     # Sent as a document (not send_video): Telegram hands the raw file
@@ -322,7 +324,7 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     safe = re.sub(r"[^\w\-]+", "_", entry.title).strip("_")[:60] or "video"
                     sent = await ctx.bot.send_document(
                         chat_id, fh, filename=f"{safe}{ext}", caption=caption,
-                        thumbnail=thumb_fh, **UPLOAD_TIMEOUTS,
+                        thumbnail=thumb_fh, reply_markup=KEYBOARD, **UPLOAD_TIMEOUTS,
                     )
         finally:
             if thumb_fh:
