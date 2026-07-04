@@ -22,7 +22,14 @@ from . import messages
 from .auth import AuthStore
 from .cache import ExtractCache
 from .config import Config
-from .downloader import DownloadError, download, extract_info, ffmpeg_available, probe_height
+from .downloader import (
+    DownloadError,
+    download,
+    extract_info,
+    ffmpeg_available,
+    prepare_thumbnail,
+    probe_height,
+)
 from .formats import human_size, parse_options, selector_for
 from .history import HistoryDB
 
@@ -285,20 +292,34 @@ async def on_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         num = history.next_number(chat_id)
         caption = _caption(entry, quality, ctx.bot.username, num, entry.url)
-        with open(path, "rb") as fh:
-            if opt.kind == "audio":
-                sent = await ctx.bot.send_audio(
-                    chat_id, fh, title=entry.title, caption=caption, **UPLOAD_TIMEOUTS
-                )
-            else:
-                # Sent as a document (not send_video): Telegram hands the raw file to
-                # the phone's native player instead of inline-decoding it — which is
-                # what makes AV1/high-res clips play on iOS.
-                ext = os.path.splitext(path)[1] or ".mp4"
-                safe = re.sub(r"[^\w\-]+", "_", entry.title).strip("_")[:60] or "video"
-                sent = await ctx.bot.send_document(
-                    chat_id, fh, filename=f"{safe}{ext}", caption=caption, **UPLOAD_TIMEOUTS
-                )
+        thumb = await prepare_thumbnail(entry.info, cfg.download_dir)
+        thumb_fh = open(thumb, "rb") if thumb else None
+        try:
+            with open(path, "rb") as fh:
+                if opt.kind == "audio":
+                    sent = await ctx.bot.send_audio(
+                        chat_id, fh, title=entry.title, caption=caption,
+                        thumbnail=thumb_fh, **UPLOAD_TIMEOUTS,
+                    )
+                else:
+                    # Sent as a document (not send_video): Telegram hands the raw file
+                    # to the phone's native player instead of inline-decoding it —
+                    # which is what makes AV1/high-res clips play on iOS. The YouTube
+                    # thumbnail rides along as the document's small preview icon.
+                    ext = os.path.splitext(path)[1] or ".mp4"
+                    safe = re.sub(r"[^\w\-]+", "_", entry.title).strip("_")[:60] or "video"
+                    sent = await ctx.bot.send_document(
+                        chat_id, fh, filename=f"{safe}{ext}", caption=caption,
+                        thumbnail=thumb_fh, **UPLOAD_TIMEOUTS,
+                    )
+        finally:
+            if thumb_fh:
+                thumb_fh.close()
+            if thumb and os.path.exists(thumb):
+                try:
+                    os.remove(thumb)
+                except OSError:
+                    pass
         entry.num, entry.quality = num, quality
         entry.doc_message_id = sent.message_id
         # No "done" text. Drop the user's original link, and turn our own message

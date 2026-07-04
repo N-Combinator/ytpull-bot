@@ -48,6 +48,49 @@ def _with_cookies(opts: dict[str, Any], cookiefile: str | None) -> dict[str, Any
     return opts
 
 
+async def prepare_thumbnail(info: dict[str, Any], outdir: str) -> str | None:
+    """Download the video thumbnail and shrink it to a Telegram-safe JPEG.
+
+    Telegram document thumbnails must be JPEG and <=320px on each side (<=200KB);
+    YouTube thumbnails are larger (and often webp), so we re-encode via ffmpeg.
+    Returns the local path, or None if anything goes wrong (thumb is optional).
+    """
+    url = info.get("thumbnail")
+    if not url:
+        thumbs = info.get("thumbnails") or []
+        url = thumbs[-1].get("url") if thumbs else None
+    if not url:
+        return None
+
+    def _run() -> str | None:
+        import subprocess
+        import urllib.request
+
+        raw = os.path.join(outdir, f"thumb_{uuid.uuid4().hex[:8]}.in")
+        out = os.path.splitext(raw)[0] + ".jpg"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as r, open(raw, "wb") as fh:
+                fh.write(r.read())
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", raw,
+                 "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+                 "-frames:v", "1", out],
+                timeout=30, check=True,
+            )
+            return out if os.path.exists(out) else None
+        except Exception:  # noqa: BLE001 - thumbnail is best-effort
+            return None
+        finally:
+            if os.path.exists(raw):
+                try:
+                    os.remove(raw)
+                except OSError:
+                    pass
+
+    return await asyncio.to_thread(_run)
+
+
 async def extract_info(url: str, cookiefile: str | None = None) -> dict[str, Any]:
     """Fetch metadata + available formats without downloading."""
     def _run() -> dict[str, Any]:
