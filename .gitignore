@@ -17,5 +17,7 @@ downloads/
 *.m4a
 *.temp
 cookies.txt
+authorized.json
+authorized.json.tmp
 history.db
 history.json
